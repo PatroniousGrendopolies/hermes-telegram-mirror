@@ -31,17 +31,19 @@ class Progress:
                     self.store.enqueue(db, f'{origin_key}:user', f"👤 {self.settings['user_label']} (Desktop): {user}", kind='user')
             return
         if kind == 'interim' and self.settings.get('show_interim', True):
-            text = event.get('text', '')
-            if not text.strip():
+            text = event.get('text', '').strip()
+            if not text:
                 return
-            identity = f"interim:{key}:{event.get('iteration')}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+            identity = f"note:{key}:{event.get('iteration')}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
             with self.store.tx() as db:
                 # A late asynchronous stream observer must not resurrect a finished turn.
                 row = db.execute('SELECT active FROM live_turns WHERE id=?', (key,)).fetchone()
                 if not row or not row['active']:
                     return
-                self.store.enqueue(db, identity, f"🤖 {self.settings['bot_label']}: {text}", kind='interim')
-                db.execute('UPDATE live_turns SET last_interim=?,interim_key=? WHERE id=?', (text.strip(), identity, key))
+                if not db.execute('SELECT 1 FROM live_tools WHERE id=?', (identity,)).fetchone():
+                    note = text if len(text) <= self.NOTE_LIMIT else text[:self.NOTE_LIMIT - 1] + '…'
+                    self._card_add(db, key, identity, note, event['at'], 'note')
+                db.execute('UPDATE live_turns SET last_interim=?,interim_key=? WHERE id=?', (text, identity, key))
                 self.trim(db)
             return
         if kind.startswith('tool_') and self.settings.get('show_tools', True):
@@ -49,23 +51,28 @@ class Progress:
             return
         if kind == 'final':
             reply = event.get('assistant_response', '')
-            skip = False
             with self.store.tx() as db:
                 row = db.execute('SELECT * FROM live_turns WHERE id=?', (key,)).fetchone()
-                if row and reply.strip() and row['last_interim'] == reply.strip():
-                    outputs = db.execute('SELECT status FROM outbox WHERE id LIKE ?', (row['interim_key'] + ':%',)).fetchall()
-                    skip = bool(outputs) and all(r['status'] in {'pending', 'sending', 'sent'} for r in outputs)
-                    if skip:
-                        db.execute("UPDATE outbox SET kind='final' WHERE id LIKE ?", (row['interim_key'] + ':%',))
+                if row and reply.strip() and row['last_interim'] == reply.strip() and row['interim_key']:
+                    # The last interim IS the answer: drop it from the card; the final carries it.
+                    note = db.execute('SELECT batch FROM live_tools WHERE id=?', (row['interim_key'],)).fetchone()
+                    if note:
+                        db.execute('DELETE FROM live_tools WHERE id=?', (row['interim_key'],))
+                        self._card_render(db, note['batch'], event['at'])
                 db.execute('UPDATE live_turns SET active=0 WHERE id=?', (key,))
             self.store.record_turn(key, event.get('user_message', ''), reply,
-                                   self.settings['user_label'], self.settings['bot_label'], skip_reply=skip)
+                                   self.settings['user_label'], self.settings['bot_label'], skip_reply=False)
 
     def trim(self, db):
         cap = self.settings.get('progress_queue_limit', 256)
         count = db.execute("SELECT count(*) FROM outbox WHERE status='pending' AND kind IN ('tool','interim')").fetchone()[0]
         if count > cap:
             db.execute("UPDATE outbox SET status='dropped' WHERE seq IN (SELECT seq FROM outbox WHERE status='pending' AND kind IN ('tool','interim') ORDER BY CASE kind WHEN 'tool' THEN 0 ELSE 1 END,seq LIMIT ?)", (count - cap,))
+
+    # One live "activity card" per turn: interim notes and tool lines accumulate in a single
+    # Telegram message that is edited in place; it rolls over to a new card near the size limit.
+    CARD_LIMIT = 3400
+    NOTE_LIMIT = 700
 
     def tool(self, event, turn):
         call_id = event.get('tool_call_id')
@@ -76,37 +83,64 @@ class Progress:
         with self.store.tx() as db:
             existing = db.execute('SELECT * FROM live_tools WHERE id=?', (tool_id,)).fetchone()
             if not existing:
-                batch_row = db.execute('SELECT batch,min(started) AS first,count(*) AS n FROM live_tools WHERE turn_id=? GROUP BY batch ORDER BY first DESC LIMIT 1', (turn,)).fetchone()
-                # Five lines fit under 3800 even when every preview char is '&'.
-                if batch_row and at - batch_row['first'] <= 1.5 and batch_row['n'] < 5:
-                    batch, started = batch_row['batch'], batch_row['first']
-                else:
-                    batch, started = f'tools:{tool_id}', at
                 line = preview(event.get('tool_name', 'tool'), event.get('primary', ''))
-                db.execute('INSERT INTO live_tools VALUES (?,?,?,?,?,?,?)', (tool_id, turn, batch, line, at, 'running', None))
+                batch = self._card_add(db, turn, tool_id, line, at, 'running')
             else:
                 batch = existing['batch']
-                started = db.execute('SELECT min(started) FROM live_tools WHERE batch=?', (batch,)).fetchone()[0]
             if event['kind'] == 'tool_end':
                 status = 'ok' if event.get('status') in {'success', 'ok', 'completed'} else 'error'
                 duration = max(0, float(event.get('duration_ms') or 0)) / 1000
                 db.execute('UPDATE live_tools SET status=?,duration=? WHERE id=?', (status, duration, tool_id))
-            lines = []
-            for row in db.execute('SELECT * FROM live_tools WHERE batch=? ORDER BY started,id', (batch,)):
-                suffix = '⏳' if row['status'] == 'running' else f"{'✅' if row['status'] == 'ok' else '❌'} {row['duration']:.1f}s"
-                # Preview arguments are literal text, not Markdown supplied by a tool.
-                lines.append(row['line'] + ' ' + suffix)
-            import html
-            body = '\n'.join(lines)
-            html_body = html.escape(body, quote=False)
-            row = db.execute('SELECT * FROM outbox WHERE id=?', (batch,)).fetchone()
-            if row is None:
-                db.execute('INSERT INTO outbox(id,body,html,kind,created,ready) VALUES (?,?,?,?,?,?)',
-                           (batch, body, html_body, 'tool', at, started + 1.5))
-            elif row['status'] not in {'dropped', 'uncertain', 'failed'}:
-                db.execute("UPDATE outbox SET body=?,html=?,revision=revision+1,status=CASE WHEN status='sent' THEN 'pending' ELSE status END WHERE id=?",
-                           (body, html_body, batch))
+                self._card_render(db, batch, at)
             self.trim(db)
+
+    def _card_add(self, db, turn, item_id, line, at, status):
+        last = db.execute('SELECT batch FROM live_tools WHERE turn_id=? ORDER BY rowid DESC LIMIT 1',
+                          (turn,)).fetchone()
+        batch = last['batch'] if last else f'card:{turn}:0'
+        db.execute('INSERT INTO live_tools VALUES (?,?,?,?,?,?,?)', (item_id, turn, batch, line, at, status, None))
+        if last and self._html_len(self._card_body(db, batch)) > self.CARD_LIMIT:
+            index = int(batch.rsplit(':', 1)[1]) + 1 if batch.startswith('card:') else 1
+            batch = f'card:{turn}:{index}'
+            db.execute('UPDATE live_tools SET batch=? WHERE id=?', (batch, item_id))
+        self._card_render(db, batch, at)
+        return batch
+
+    @staticmethod
+    def _html_len(body):
+        import html
+        return len(html.escape(body, quote=False).encode('utf-16-le')) // 2
+
+    @staticmethod
+    def _card_body(db, batch):
+        lines = []
+        for row in db.execute('SELECT * FROM live_tools WHERE batch=? ORDER BY rowid', (batch,)):
+            if row['status'] == 'note':
+                lines.append(f"💬 {row['line']}")
+            elif row['status'] == 'running':
+                lines.append(f"{row['line']} ⏳")
+            else:
+                mark = '✅' if row['status'] == 'ok' else '❌'
+                lines.append(f"{row['line']} {mark} {row['duration']:.1f}s")
+        return '\n'.join(lines)
+
+    def _card_render(self, db, batch, at):
+        import html
+        body = self._card_body(db, batch)
+        # Preview arguments and notes are literal text, not Markdown supplied by a tool.
+        html_body = html.escape(body, quote=False)
+        row = db.execute('SELECT * FROM outbox WHERE id=?', (batch,)).fetchone()
+        if not body.strip():
+            if row and row['status'] == 'pending' and row['message_id'] is None:
+                db.execute("UPDATE outbox SET status='dropped' WHERE id=?", (batch,))
+            return
+        if row is None:
+            db.execute('INSERT INTO outbox(id,body,html,kind,created,ready) VALUES (?,?,?,?,?,?)',
+                       (batch, body, html_body, 'tool', at, at + 1.5))
+        elif row['status'] not in {'dropped', 'uncertain', 'failed'}:
+            db.execute("UPDATE outbox SET body=?,html=?,revision=revision+1,"
+                       "status=CASE WHEN status='sent' THEN 'pending' ELSE status END WHERE id=?",
+                       (body, html_body, batch))
 
     def typing_due(self):
         with self.store.tx() as db:

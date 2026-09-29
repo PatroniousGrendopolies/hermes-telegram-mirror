@@ -83,8 +83,10 @@ def test_interim_final_dedupe_and_no_late_resurrection(runtime):
     emit(runtime, 'interim', text='done', iteration=1)
     emit(runtime, 'final', assistant_response='done', user_message='')
     emit(runtime, 'interim', text='late duplicate', iteration=2)
-    assert len(outputs(runtime)) == 1
-    assert outputs(runtime)[0]['kind'] == 'final'
+    live = [o for o in outputs(runtime) if o['status'] != 'dropped']
+    assert len(live) == 1  # The interim equal to the answer leaves the card; final carries it.
+    assert live[0]['kind'] == 'final'
+    assert 'late duplicate' not in ''.join(o['body'] for o in outputs(runtime))
 
 
 def test_dropped_interim_does_not_lose_final(runtime):
@@ -144,7 +146,8 @@ def test_progress_queue_bounds_and_final_preserved(runtime):
         emit(runtime, 'tool_start', tool_call_id=str(i), tool_name='terminal', primary='date', at=time.time() + i * 2)
     emit(runtime, 'final', assistant_response='final')
     pending = [x for x in outputs(runtime) if x['status'] == 'pending']
-    assert len([x for x in pending if x['kind'] == 'tool']) == 2
+    cards = [x for x in pending if x['kind'] == 'tool']
+    assert len(cards) == 1 and cards[0]['body'].count('🔧') == 4  # One edited card, not 4 messages.
     assert pending[-1]['body'] == '🤖 Bot: final'
 
 
@@ -260,5 +263,53 @@ def test_tool_html_bound_under_escape_expansion(runtime):
     for i in range(20):
         emit(runtime, 'tool_start', tool_call_id=str(i), tool_name='n' * 60, primary='&' * 120)
     cards = outputs(runtime)
-    assert len(cards) == 4
+    assert 1 < len(cards) < 20  # Rolls over near the limit instead of one message per call.
     assert all(len(c['html'].encode('utf-16-le')) // 2 < 3800 for c in cards)
+
+
+def test_turn_activity_is_one_edited_card(runtime):
+    emit(runtime, 'start')
+    emit(runtime, 'interim', text='Checking the thread first.', iteration=1)
+    emit(runtime, 'tool_start', tool_call_id='a', tool_name='read_file', primary='notes.md', at=time.time() + 5)
+    emit(runtime, 'tool_end', tool_call_id='a', status='success', duration_ms=500)
+    emit(runtime, 'interim', text='Now building the draft.', iteration=2)
+    emit(runtime, 'tool_start', tool_call_id='b', tool_name='terminal', primary='date', at=time.time() + 30)
+    cards = [o for o in outputs(runtime) if o['kind'] == 'tool']
+    assert len(cards) == 1
+    body = cards[0]['body']
+    assert body.index('💬 Checking') < body.index('read_file') < body.index('💬 Now building') < body.index('terminal')
+    assert '✅ 0.5s' in body and '⏳' in body
+    emit(runtime, 'final', assistant_response='Draft ready.', user_message='')
+    assert outputs(runtime)[-1]['body'] == '🤖 Bot: Draft ready.'
+
+
+def test_receipt_reactions_follow_status(runtime):
+    runtime.handle_update({'update_id': 7, 'message': {'message_id': 555, 'text': 'hello',
+                           'from': {'id': 123}, 'chat': {'id': 123, 'type': 'private'}}})
+    assert runtime.send_one()
+    runtime.api.call.assert_called_with('setMessageReaction', {
+        'chat_id': 123, 'message_id': 555, 'reaction': [{'type': 'emoji', 'emoji': '👀'}]})
+    with runtime.store.tx() as db:
+        db.execute("UPDATE inbox SET status='settled'")
+    open_gate(runtime)
+    assert runtime.send_one()
+    assert runtime.api.call.call_args.args[1]['reaction'][0]['emoji'] == '👍'
+    open_gate(runtime)
+    runtime.api.call.reset_mock()
+    runtime.send_one()
+    assert not any(c.args[0] == 'setMessageReaction' for c in runtime.api.call.call_args_list)
+
+
+def test_receipts_can_be_disabled(runtime):
+    runtime.settings['receipts'] = False
+    runtime.handle_update({'update_id': 8, 'message': {'message_id': 556, 'text': 'hi',
+                           'from': {'id': 123}, 'chat': {'id': 123, 'type': 'private'}}})
+    runtime.send_one()
+    assert not any(c.args[0] == 'setMessageReaction' for c in runtime.api.call.call_args_list)
+
+
+def test_table_blank_header_column():
+    md = '| | Amount |\n|---|---|\n| Catering | $11,400 |\n| Bar | $5,400 |'
+    plain = ''.join(c['plain'] for c in render(md))
+    assert '• Catering · Amount: $11,400' in plain
+    assert ': Catering' not in plain

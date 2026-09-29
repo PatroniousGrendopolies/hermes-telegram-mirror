@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- One live activity card per turn: interim notes (💬) and tool lines share a single Telegram message edited in place, rolling over only near the size limit (was one message per interim and per tool burst).
+- Receipt reactions on the owner's Telegram message: 👀 picked up, 👍 delivered into the Bot Chat, 😢 held/failed. `receipts: false` disables; emojis configurable. Rate-gated with all other sends.
+- Tables with a blank header cell render the row label alone (was `• : Catering`).
+
 ## 0.3.1
 
 - Unconfigured profiles load dormant: declared hooks register as no-ops, no threads or network I/O (lets `hermes plugins validate` run the capability probe).

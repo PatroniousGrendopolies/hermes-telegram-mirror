@@ -40,6 +40,10 @@ class Store:
                                       'created': 'REAL NOT NULL DEFAULT 0'}.items():
                 if name not in columns:
                     db.execute(f'ALTER TABLE outbox ADD COLUMN {name} {declaration}')
+            inbox_columns = {r[1] for r in db.execute('PRAGMA table_info(inbox)')}
+            for name, declaration in {'tg_message_id': 'INTEGER', 'reaction_sent': 'TEXT'}.items():
+                if name not in inbox_columns:
+                    db.execute(f'ALTER TABLE inbox ADD COLUMN {name} {declaration}')
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS live_turns (
                     id TEXT PRIMARY KEY, session_id TEXT, origin TEXT, active INTEGER,
@@ -94,7 +98,8 @@ class Store:
     def offset(self) -> int:
         return self.get("offset", 0)
 
-    def accept(self, update_id: int, text: str | None, local_reply: str | None = None) -> str:
+    def accept(self, update_id: int, text: str | None, local_reply: str | None = None,
+               message_id: int | None = None) -> str:
         """Durable admission + offset in one commit. Repeated updates are harmless."""
         identity = hashlib.sha256(f"telegram-update:{update_id}".encode()).hexdigest()
         with self.tx() as db:
@@ -107,8 +112,10 @@ class Store:
                     salt += 1
                     identity = hashlib.sha256(f'telegram-update:{update_id}:{salt}'.encode()).hexdigest()
             if text is not None:
-                db.execute("INSERT OR IGNORE INTO inbox(id,update_id,text,status,created) VALUES (?,?,?,?,?)",
-                           (identity, update_id, text, "local" if local_reply else "pending", time.time()))
+                db.execute("INSERT OR IGNORE INTO inbox(id,update_id,text,status,created,tg_message_id) "
+                           "VALUES (?,?,?,?,?,?)",
+                           (identity, update_id, text, "local" if local_reply else "pending", time.time(),
+                            message_id if isinstance(message_id, int) else None))
                 if local_reply:
                     self.enqueue(db, f"local:{identity}", local_reply)
             # Synthetic tests use negative ids and never advance the real cursor.
@@ -133,6 +140,27 @@ class Store:
                 db.execute("UPDATE inbox SET status='delivering' WHERE id=?", (row['id'],))
                 return dict(row)
         return None
+
+    # Receipt reactions on the user's own Telegram message, derived from inbox status so every
+    # status transition (including crash recovery) is reflected without per-path bookkeeping.
+    RECEIPT_SQL = ("CASE WHEN status='pending' THEN :seen "
+                   "WHEN status IN ('delivering','waiting','settled') THEN :delivered "
+                   "WHEN status IN ('uncertain','failed') THEN :problem END")
+
+    def claim_reaction(self, emojis: dict, horizon: float = 172800):
+        """Oldest message whose visible receipt differs from its status (48h window)."""
+        with self.tx() as db:
+            row = db.execute(
+                f"SELECT id, tg_message_id, {self.RECEIPT_SQL} AS want FROM inbox "
+                "WHERE tg_message_id IS NOT NULL AND created > :since "
+                f"AND COALESCE(reaction_sent,'') != COALESCE({self.RECEIPT_SQL},'') "
+                "ORDER BY created LIMIT 1",
+                {**emojis, 'since': time.time() - horizon}).fetchone()
+            return dict(row) if row and row['want'] else None
+
+    def mark_reaction(self, identity, emoji):
+        with self.tx() as db:
+            db.execute("UPDATE inbox SET reaction_sent=? WHERE id=?", (emoji, identity))
 
     def finish_input(self, identity, status, route=None, error=None):
         with self.tx() as db:

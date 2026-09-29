@@ -68,10 +68,11 @@ class Telegram:
         )
 
     def call(self, method: str, payload: dict | None = None, timeout: float = 5):
-        if method not in {"getMe", "getUpdates", "getWebhookInfo", "sendMessage", "editMessageText", "sendChatAction"}:
+        if method not in {"getMe", "getUpdates", "getWebhookInfo", "sendMessage", "editMessageText", "sendChatAction",
+                          "setMessageReaction"}:
             raise ValueError("Unsupported Telegram API method")
         payload = dict(payload or {})
-        if method in {"sendMessage", "editMessageText", "sendChatAction"}:
+        if method in {"sendMessage", "editMessageText", "sendChatAction", "setMessageReaction"}:
             if int(payload.get("chat_id", 0)) != self.chat_id:
                 raise ValueError("Telegram destination is not configured chat")
         request = urllib.request.Request(

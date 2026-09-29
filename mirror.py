@@ -78,7 +78,44 @@ class Mirror:
         if not isinstance(text, str) or not text.strip():
             return self.store.accept(uid, '', 'This mirror accepts text messages only; please send text.')
         command = text.split(maxsplit=1)[0].split('@', 1)[0]
-        return self.store.accept(uid, text, self.status() if command in {'/start', '/status'} else None)
+        return self.store.accept(uid, text, self.status() if command in {'/start', '/status'} else None,
+                                 message_id=msg.get('message_id'))
+
+    DEFAULT_RECEIPTS = {'seen': '👀', 'delivered': '👍', 'problem': '😢'}
+
+    def receipt_emojis(self):
+        conf = self.settings.get('receipts', True)
+        if conf is False:
+            return None
+        emojis = dict(self.DEFAULT_RECEIPTS)
+        if isinstance(conf, dict):
+            emojis.update({k: v for k, v in conf.items() if k in emojis and isinstance(v, str)})
+        return emojis
+
+    def react_one(self):
+        """Update one receipt reaction (one rate slot). Best effort: failures never retry-loop."""
+        emojis = self.receipt_emojis()
+        if not emojis:
+            return False
+        row = self.store.claim_reaction(emojis)
+        if not row:
+            return False
+        self.store.set('next_send_at', time.time() + 1.05)
+        try:
+            self.api.call('setMessageReaction', {
+                'chat_id': self.settings['chat_id'], 'message_id': row['tg_message_id'],
+                'reaction': [{'type': 'emoji', 'emoji': row['want']}]})
+            self.progress.audit('reaction', row['id'], row['tg_message_id'], 'ok')
+        except APIError as exc:
+            if exc.code == 429:
+                self.store.set('next_send_at', time.time() + max(1.05, exc.retry_after))
+                return True
+            self.progress.audit('reaction', row['id'], row['tg_message_id'], f'API {exc.code}')
+        except Exception:
+            self.progress.audit('reaction', row['id'], row['tg_message_id'], 'uncertain')
+        # Mark even on non-429 failure: receipts are cosmetic and must never block the outbox.
+        self.store.mark_reaction(row['id'], row['want'])
+        return True
 
     def send_one(self):
         # A single gateway sender owns ALL outbound calls, across every hook process.
@@ -96,6 +133,8 @@ class Mirror:
             except Exception:
                 self.progress.typing_failed(typing)
                 self.progress.audit('typing', typing, None, 'failed')
+            return True
+        if self.react_one():
             return True
         row = self.store.claim_output()
         if not row:

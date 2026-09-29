@@ -51,10 +51,16 @@ def spans(markdown):
             while i < len(lines) and '|' in lines[i] and lines[i].strip():
                 result.append(('• ', ()))
                 cells = _cells(lines[i])
+                first = True
                 for j, title in enumerate(headers):
-                    if j:
+                    value = cells[j] if j < len(cells) else ''
+                    if not title and not value:
+                        continue
+                    if not first:
                         result.append((' · ', ()))
-                    result.extend(_inline(title + ': ' + (cells[j] if j < len(cells) else '')))
+                    first = False
+                    # A blank header (common for a row-label column) renders the value alone.
+                    result.extend(_inline(f'{title}: {value}' if title else value))
                 result.append(('\n', ()))
                 i += 1
             continue

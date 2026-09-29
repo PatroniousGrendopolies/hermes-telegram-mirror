@@ -15,4 +15,7 @@ long_poll_seconds: 20
 turn_timeout_seconds: 600
 show_tools: true
 show_interim: true
+# Receipt reactions on your own messages: 👀 picked up, 👍 delivered, 😢 held/failed.
+# Set to false to disable, or a mapping to override emojis (must be Telegram-allowed reactions).
+receipts: true
 progress_queue_limit: 256
