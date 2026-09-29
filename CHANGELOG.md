@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Unconfigured profiles load dormant: declared hooks register as no-ops, no threads or network I/O (lets `hermes plugins validate` run the capability probe).
+- Manifest declares `provides_hooks` / `provides_tools` for catalog validation.
+- Removed dynamic `__import__` (security scan now `safe`).
+
 ## 0.3.0
 
 - Shared code checkout with profile-local configuration and SQLite state.

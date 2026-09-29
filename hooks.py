@@ -1,5 +1,6 @@
 """Hot-path hook ingress. Callbacks never perform SQLite, formatting or network I/O."""
 from collections import deque
+from os import getpid
 import atexit
 import logging
 import threading
@@ -95,7 +96,7 @@ class HookBridge:
                     continue
                 self.runtime.progress.handle(event)
                 if event['kind'] == 'final':
-                    stats = {'pid': __import__('os').getpid(), 'version': 2,
+                    stats = {'pid': getpid(), 'version': 2,
                              'callbacks': self.count, 'max_callback_us': self.max_ns / 1000,
                              'dropped_progress': self.dropped}
                     self.runtime.store.set('hook_metrics', stats)

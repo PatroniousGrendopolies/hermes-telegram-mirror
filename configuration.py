@@ -3,8 +3,12 @@ from pathlib import Path
 import yaml
 
 
+def settings_path(home: Path) -> Path:
+    return Path(home) / 'plugin-data' / 'telegram-mirror' / 'mirror.yaml'
+
+
 def load_settings(home: Path, profile: str) -> dict:
-    path = Path(home) / 'plugin-data' / 'telegram-mirror' / 'mirror.yaml'
+    path = settings_path(home)
     settings = yaml.safe_load(path.read_text())
     if not isinstance(settings, dict) or settings.get('profile') != profile:
         raise ValueError('telegram-mirror configuration belongs to a different profile')
