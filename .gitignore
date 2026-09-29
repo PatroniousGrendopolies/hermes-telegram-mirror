@@ -1,0 +1,17 @@
+mirror.yaml
+.env
+.env.*
+state/
+plugin-data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.benchmarks/
+.venv/
+*.sqlite3*
+*.db*
+*.lock
+*.log
+*.bak*
+.DS_Store

@@ -1,0 +1,18 @@
+# Copy to PROFILE_HOME/plugin-data/telegram-mirror/mirror.yaml, mode 0600.
+# No token belongs in this file. Replace every example value before enabling.
+profile: example-profile
+host: standalone  # Recommended: no scheduler or messaging-platform adapter.
+session_id: null  # Unique unarchived hidden Bot Chat, following compression.
+chat_id: 123  # Replace with your private Telegram chat ID.
+allowlist: [123]  # Replace with allowed Telegram sender IDs.
+user_label: Owner
+bot_label: Example Bot
+bot_username: YOUR_BOT_USERNAME
+keychain_service: example-bot-token
+keychain_account: mirror-worker
+hermes_executable: /absolute/path/to/hermes
+long_poll_seconds: 20
+turn_timeout_seconds: 600
+show_tools: true
+show_interim: true
+progress_queue_limit: 256

@@ -1,0 +1,3 @@
+name: telegram-mirror
+version: "0.3.0"
+description: "Live Bot Chat mirror with typing, interim messages, redacted tool cards and Telegram HTML."

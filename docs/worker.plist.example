@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>local.telegram-mirror.EXAMPLE_PROFILE</string>
+  <key>ProgramArguments</key><array>
+    <string>HERMES_PYTHON_ABSOLUTE</string>
+    <string>CHECKOUT_ABSOLUTE/worker.py</string>
+    <string>--home</string><string>PROFILE_HOME_ABSOLUTE</string>
+    <string>--profile</string><string>EXAMPLE_PROFILE</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PYTHONPATH</key><string>HERMES_SOURCE_ABSOLUTE</string>
+    <key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
+    <key>HERMES_HOME</key><string>PROFILE_HOME_ABSOLUTE</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>PROFILE_HOME_ABSOLUTE</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ExitTimeOut</key><integer>650</integer>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>PROFILE_HOME_ABSOLUTE/plugin-data/telegram-mirror/worker.log</string>
+  <key>StandardErrorPath</key><string>PROFILE_HOME_ABSOLUTE/plugin-data/telegram-mirror/worker.log</string>
+</dict></plist>
