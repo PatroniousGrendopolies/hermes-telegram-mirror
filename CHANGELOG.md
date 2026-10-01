@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+
+- A clean CLI failure (agent exited non-zero: bad model, quota, context) marks only that turn `failed`, notifies the owner on Telegram and lets the next turn through. Previously it was treated as an unknown outcome and held the queue indefinitely.
+- Unknown outcomes still hold the queue, but the owner is told on Telegram and `/unhold` releases it (nothing is replayed).
+
 ## 0.3.3
 
 - Inbound photos, voice memos, audio, documents and video notes. Images are passed as `[Image attached at:]` markers, voice/audio transcribed locally with faster-whisper (`stt_model` setting, default `base`), other files as path hints. Allowlist is enforced before any download; 20 MB streamed cap, sanitized names, 0600 files, token-free errors.

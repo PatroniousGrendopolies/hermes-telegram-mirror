@@ -167,6 +167,12 @@ class Store:
             db.execute("UPDATE inbox SET status=?,route=COALESCE(?,route),error=? WHERE id=?",
                        (status, route, error, identity))
 
+    def release_held(self) -> int:
+        """Owner-acknowledged: held turns become 'failed' so the queue moves again.
+        Nothing is replayed; the owner resends what still matters."""
+        with self.tx() as db:
+            return db.execute("UPDATE inbox SET status='failed' WHERE status IN ('uncertain','delivering','waiting')").rowcount
+
     def claim_output(self):
         with self.tx() as db:
             row = db.execute("SELECT * FROM outbox WHERE status IN ('pending','sending') ORDER BY seq LIMIT 1").fetchone()

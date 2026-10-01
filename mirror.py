@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from .compat import Delivery, gateway_host
+from .compat import Delivery, DeliveryError, gateway_host
 from . import media
 from .store import Store, marker
 from .transport import APIError, Telegram
@@ -57,8 +57,8 @@ class Mirror:
                 f"Telegram polling: {poll_error or poll_health}\n"
                 f"Bot Chat: {self.delivery.session()}\n"
                 f"Queues: {self.store.summary()}\n"
-                "Text, photos, voice memos and files enter the same Bot Chat. /start and /status stay local.\n"
-                "Uncertain delivery is held for inspection, never automatically replayed.")
+                "Text, photos, voice memos and files enter the same Bot Chat. /start, /status and /unhold stay local.\n"
+                "Uncertain delivery is held for inspection, never automatically replayed; /unhold releases the queue.")
 
     def handle_update(self, update: dict):
         """The poller and synthetic integration test both call this exact admission path."""
@@ -89,6 +89,10 @@ class Mirror:
         if not isinstance(text, str) or not text.strip():
             return self.store.accept(uid, '', 'This mirror accepts text, photos, voice memos and files.')
         command = text.split(maxsplit=1)[0].split('@', 1)[0]
+        if command == '/unhold':
+            n = self.store.release_held()
+            return self.store.accept(uid, text, f'Released {n} held turn(s). Resend anything that still matters.',
+                                     message_id=msg.get('message_id'))
         return self.store.accept(uid, text, self.status() if command in {'/start', '/status'} else None,
                                  message_id=msg.get('message_id'))
 
@@ -188,9 +192,26 @@ class Mirror:
                 self.store.reply_once(row['id'], result.get('reply', ''), self.settings['bot_label'])
             elif result['status'] != 'waiting':
                 self.store.finish_input(row['id'], 'uncertain', error='Unexpected delivery result')
+        except DeliveryError as exc:
+            reason = str(exc)
+            if reason.startswith('CLI exited'):
+                # The agent ran and failed cleanly (bad model, quota, context): nothing reached the
+                # Bot Chat, so this turn is simply failed and must not block the ones behind it.
+                self.store.finish_input(row['id'], 'failed', error=reason)
+                self.store.enqueue_text(f"inbound:{row['id']}:fail",
+                                        f"😢 {self.settings['bot_label']} could not run that turn ({reason}). "
+                                        "Check the profile's model/provider and resend.")
+                log.warning('telegram-mirror turn failed: %s', reason)
+            else:
+                self.store.finish_input(row['id'], 'uncertain', error=reason)
+                self.store.enqueue_text(f"inbound:{row['id']}:held",
+                                        f"😢 {self.settings['bot_label']}: {reason}. The queue is held until you send /unhold.")
+                log.warning('telegram-mirror delivery needs inspection (no automatic retry)')
         except Exception:
             with self.store.tx() as db:
                 db.execute("UPDATE inbox SET status='uncertain',error='Delivery outcome unknown; inspect before resending' WHERE id=? AND status!='settled'", (row['id'],))
+            self.store.enqueue_text(f"inbound:{row['id']}:held",
+                                    f"😢 {self.settings['bot_label']}: delivery outcome unknown. The queue is held until you send /unhold.")
             log.warning('telegram-mirror delivery needs inspection (no automatic retry)')
         return True
 

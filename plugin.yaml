@@ -1,5 +1,5 @@
 name: telegram-mirror
-version: "0.3.3"
+version: "0.3.4"
 description: "Live two-way mirror of a profile's canonical Bot Chat into a dedicated Telegram bot: typing, interim messages, redacted tool cards and Telegram HTML."
 author: PatroniousGrendopolies
 provides_tools: []

@@ -11,7 +11,7 @@ A community plugin, not an official Hermes component. macOS/POSIX, Python 3.11+,
 - Photos, voice memos, audio, documents and video notes accepted inbound. Images reach the Bot as `[Image attached at: …]` (vision); voice/audio is transcribed locally with faster-whisper (no cloud STT); other files as a path hint. Captions become the prompt.
 - Typing refresh, assistant interim messages, redacted tool previews, completion edits.
 - Markdown subset rendered as Telegram HTML: headings, bold/italic, code, links, tables as readable rows. Balanced chunks under 3,800 UTF-16 units; rejected HTML falls back to plain text.
-- Local `/start` and `/status`; other text goes to the Bot as conversational input.
+- Local `/start`, `/status` and `/unhold` (release a held queue after inspecting); other text goes to the Bot as conversational input.
 - Profile-local persisted update offset, admission receipts, outbox and rate gate.
 
 ## Architecture
@@ -103,7 +103,7 @@ Stable turn IDs and persisted inbound receipt IDs dedupe hook/mailbox/CLI replie
 
 The sender serializes send/edit/typing requests with a persisted minimum 1.05-second interval and honors send-message 429 `retry_after`. Typing refreshes around every four seconds until final, interruption, error or a hard timeout. A very fast tool can already be complete when its batched card first posts. The last retained interim is not sent again as an identical final.
 
-This is **not mathematically exactly-once delivery**. Telegram has no send-message idempotency key. If a send might have succeeded before a connection/process failure, it is held as `uncertain`, not automatically replayed. Likewise uncertain inbound delivery blocks later turns until inspected. Compare transcript, mailbox receipt and Telegram before reconciliation. No alternate route is attempted after mailbox admission or an unknown outcome.
+This is **not mathematically exactly-once delivery**. Telegram has no send-message idempotency key. If a send might have succeeded before a connection/process failure, it is held as `uncertain`, not automatically replayed. Likewise uncertain inbound delivery blocks later turns until inspected; the owner is notified on Telegram and `/unhold` releases the queue without replaying anything. A clean agent failure (non-zero CLI exit) fails only that turn and does not hold the queue. Compare transcript, mailbox receipt and Telegram before reconciliation. No alternate route is attempted after mailbox admission or an unknown outcome.
 
 `ctx.inject_message` is process-local in the tested Hermes implementation. A positive gateway result can precede asynchronous route rejection and is not a safe cross-process delivery probe. `compat.py` uses private `tools.bot_live_delivery` ownership/mailbox/receipt APIs for a live canonical owner; without an owner it uses the public CLI. Unsupported live owners fail closed. CLI results write to the same transcript, though a visible Desktop view may need refresh.
 
