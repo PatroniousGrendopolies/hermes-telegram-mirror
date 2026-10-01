@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- Inbound photos, voice memos, audio, documents and video notes. Images are passed as `[Image attached at:]` markers, voice/audio transcribed locally with faster-whisper (`stt_model` setting, default `base`), other files as path hints. Allowlist is enforced before any download; 20 MB streamed cap, sanitized names, 0600 files, token-free errors.
+
 ## 0.3.2
 
 - One live activity card per turn: interim notes (💬) and tool lines share a single Telegram message edited in place, rolling over only near the size limit (was one message per interim and per tool burst).

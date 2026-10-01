@@ -8,6 +8,7 @@ A community plugin, not an official Hermes component. macOS/POSIX, Python 3.11+,
 
 - Desktop user turns and final responses mirrored to Telegram.
 - Telegram text delivered to the same canonical Bot Chat; no echo of your own phone input.
+- Photos, voice memos, audio, documents and video notes accepted inbound. Images reach the Bot as `[Image attached at: …]` (vision); voice/audio is transcribed locally with faster-whisper (no cloud STT); other files as a path hint. Captions become the prompt.
 - Typing refresh, assistant interim messages, redacted tool previews, completion edits.
 - Markdown subset rendered as Telegram HTML: headings, bold/italic, code, links, tables as readable rows. Balanced chunks under 3,800 UTF-16 units; rejected HTML falls back to plain text.
 - Local `/start` and `/status`; other text goes to the Bot as conversational input.
@@ -92,6 +93,7 @@ To disable: boot out the standalone LaunchAgent **and** disable the profile plug
 - Tool cards show only name, a conservatively redacted primary argument (120 characters), status and duration. Result/error bodies never enter tool cards. Each turn's interim notes and tool lines share one activity message that is edited in place (first send after 1.5 seconds, rolls over to a new message only near Telegram's size limit). Your own messages get a receipt reaction: 👀 picked up, 👍 delivered into the Bot Chat, 😢 held for inspection (`receipts: false` disables). Arbitrary unlabeled short secrets cannot be recognized reliably; set `show_tools: false` for sensitive workloads.
 - Ordinary conversation text is intentionally mirrored, not comprehensively PII-redacted. Treat Telegram and the profile state database as recipients of that content. State directory is 0700; SQLite is 0600. Encryption at rest relies on the host.
 - Query files are 0600 and moved to a private Trash folder after CLI use rather than deleted. State and receipts have no automatic retention policy; plan secure cleanup.
+- Inbound media is only fetched after the allowlist check passes, via `getFile` with a 20 MB streamed cap, sanitized filenames and 0600 files under `plugin-data/telegram-mirror/media/`. Download failures report credential-free messages. Transcription runs in-process with the whisper model named by `stt_model` (default `base`); nothing is sent to a third-party STT service.
 - Normal Hermes permissions and approvals are not weakened. There is no Telegram approval UI. A phone command can invoke the Bot's existing capabilities, so protect your Telegram account and allowlist.
 - Per-profile credentials and state are isolation boundaries against routing mistakes, not separate OS security principals.
 
@@ -127,7 +129,7 @@ Unit tests do not contact Telegram, read Keychain or run real agents. They cover
 
 ## Limitations and what upstream would need
 
-- Text only; no media transcription, token-by-token streaming, historical backfill or approval relay.
+- Inbound media only; outbound attachments, token-by-token streaming, historical backfill and approval relay are not implemented. Media files have no retention policy yet.
 - macOS Keychain and POSIX locking; other credential stores/platforms need adapters.
 - Private Hermes mailbox, ownership, compression and gateway-lock dependencies need a stable public canonical-chat delivery API with durable admission/completion receipts.
 - Add public cross-process hook activation, API contract tests, reconnect/crash soak tests, bounded retention and safe reconciliation tooling.
