@@ -224,6 +224,24 @@ def test_live_owner_adapter_never_calls_cli_after_admission(mirror, monkeypatch)
     assert rows(mirror, 'inbox')[0]['route'] == 'mailbox'
 
 
+def test_cli_turn_does_not_inherit_host_approval_bypass(mirror, monkeypatch, tmp_path):
+    # The worker can lead inside any Hermes process; a --yolo/-z host must not leak its bypass.
+    monkeypatch.setenv('HERMES_YOLO_MODE', '1')
+    monkeypatch.setenv('HERMES_ACCEPT_HOOKS', '1')
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen.update(kwargs['env'])
+        return SimpleNamespace(returncode=0, stdout='ok')
+
+    monkeypatch.setattr('subprocess.run', fake_run)
+    delivery = Delivery(mirror.home, mirror.settings, mirror.store, mirror.stop)
+    assert delivery.run_cli('canonical', 'hello')['status'] == 'settled'
+    assert 'HERMES_YOLO_MODE' not in seen
+    assert 'HERMES_ACCEPT_HOOKS' not in seen
+
+
 def test_exclusive_poller_lock(tmp_path):
     import fcntl
     with open(tmp_path / 'poller.lock', 'a') as a, open(tmp_path / 'poller.lock', 'a') as b:

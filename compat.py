@@ -103,6 +103,10 @@ class Delivery:
         env = os.environ.copy()
         env['HERMES_HOME'] = str(self.home)
         env['PYTHONDONTWRITEBYTECODE'] = '1'
+        # The worker may lead inside a --yolo / -z / YOLO-toggled Hermes process; never let that
+        # host's approval bypass carry into phone-originated turns.
+        env.pop('HERMES_YOLO_MODE', None)
+        env.pop('HERMES_ACCEPT_HOOKS', None)
         command = [self.settings['hermes_executable'], '-p', self.settings['profile'],
                    'chat', '--resume', session_id, '--query-file', str(query), '--oneshot', '-Q']
         try:
