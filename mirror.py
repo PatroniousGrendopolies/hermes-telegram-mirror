@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .compat import Delivery, gateway_host
+from . import media
 from .store import Store, marker
 from .transport import APIError, Telegram
 from .progress import Progress
@@ -56,7 +57,7 @@ class Mirror:
                 f"Telegram polling: {poll_error or poll_health}\n"
                 f"Bot Chat: {self.delivery.session()}\n"
                 f"Queues: {self.store.summary()}\n"
-                "Text messages enter the same Bot Chat. /start and /status stay local.\n"
+                "Text, photos, voice memos and files enter the same Bot Chat. /start and /status stay local.\n"
                 "Uncertain delivery is held for inspection, never automatically replayed.")
 
     def handle_update(self, update: dict):
@@ -75,8 +76,18 @@ class Mirror:
             self.store.accept(uid, None)
             return None
         text = msg.get('text')
+        if (not isinstance(text, str) or not text.strip()) and media.describe(msg):
+            try:
+                kind, path = media.fetch(self.api, msg, self.store.root)
+            except RuntimeError as exc:
+                return self.store.accept(uid, '', str(exc))
+            except Exception:
+                log.warning('telegram-mirror media download failed')
+                return self.store.accept(uid, '', 'Could not download that attachment; please try again.')
+            text = media.compose(kind, path, msg.get('caption'), self.settings.get('stt_model', 'base'))
+            return self.store.accept(uid, text, None, message_id=msg.get('message_id'))
         if not isinstance(text, str) or not text.strip():
-            return self.store.accept(uid, '', 'This mirror accepts text messages only; please send text.')
+            return self.store.accept(uid, '', 'This mirror accepts text, photos, voice memos and files.')
         command = text.split(maxsplit=1)[0].split('@', 1)[0]
         return self.store.accept(uid, text, self.status() if command in {'/start', '/status'} else None,
                                  message_id=msg.get('message_id'))

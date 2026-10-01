@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import urllib.error
@@ -69,7 +70,7 @@ class Telegram:
 
     def call(self, method: str, payload: dict | None = None, timeout: float = 5):
         if method not in {"getMe", "getUpdates", "getWebhookInfo", "sendMessage", "editMessageText", "sendChatAction",
-                          "setMessageReaction"}:
+                          "setMessageReaction", "getFile"}:
             raise ValueError("Unsupported Telegram API method")
         payload = dict(payload or {})
         if method in {"sendMessage", "editMessageText", "sendChatAction", "setMessageReaction"}:
@@ -103,6 +104,38 @@ class Telegram:
         except Exception:
             # urllib exceptions include the credential-bearing URL. Never expose them.
             raise UncertainSend("Telegram network outcome unknown") from None
+
+    def download(self, file_path: str, dest, max_bytes: int, timeout: float = 60):
+        """Stream a getFile result to disk (0600), bounded, token never surfaced."""
+        if not file_path or ".." in file_path or file_path.startswith("/"):
+            raise RuntimeError("Telegram returned an unusable file path")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/file/bot{self._token}/{file_path}", method="GET")
+        try:
+            with self._opener.open(request, timeout=timeout) as response:
+                fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                total = 0
+                with os.fdopen(fd, "wb") as out:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise RuntimeError("file exceeded size limit")
+                        out.write(chunk)
+        except RuntimeError:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            raise RuntimeError("That file was too large to download.") from None
+        except Exception:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            raise RuntimeError("Could not download that file from Telegram.") from None
 
     def send(self, text: str, html: str | None = None, message_id: int | None = None) -> dict:
         text = scrub(text, self._token)
