@@ -12,7 +12,9 @@ import time
 
 def inspect(db_path, now):
     issues = []
-    with sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=2) as db:
+    # Plain connect (SELECTs only): a read-only URI cannot open a WAL database whose -shm
+    # file is being recreated by a just-restarted worker, which caused false alarms.
+    with sqlite3.connect(db_path, timeout=10) as db:
         meta = {k: json.loads(v) for k, v in db.execute('SELECT key,value FROM meta')}
         hb = meta.get('heartbeat') or {}
         if now - hb.get('time', 0) > 180:
@@ -30,7 +32,9 @@ def inspect(db_path, now):
             issues.append('active turn over one hour')
         if db.execute("SELECT count(*) FROM outbox WHERE status='pending' AND created<?", (now-300,)).fetchone()[0]:
             issues.append('outbound pending over five minutes')
-        uncertain = db.execute("SELECT count(*) FROM outbox WHERE status IN ('uncertain','failed') AND kind='final'").fetchone()[0]
+        # Only recent ones: a days-old unconfirmed send is history, not an outage to re-alert on.
+        uncertain = db.execute("SELECT count(*) FROM outbox WHERE status IN ('uncertain','failed') AND kind='final' "
+                               "AND created>?", (now - 86400,)).fetchone()[0]
         if uncertain:
             issues.append(f'{uncertain} final reply delivery outcomes need inspection')
         busy = db.execute("SELECT count(*) FROM inbox WHERE status IN ('delivering','waiting')").fetchone()[0]

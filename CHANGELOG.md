@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.7
+
+- Watchdog opens mirror databases read-write (SELECT only) instead of a read-only URI, which failed on a just-restarted worker's WAL and raised false alarms.
+- Unconfirmed final replies only alert for 24 h instead of forever.
+- launchd `ExitTimeOut` should exceed `turn_timeout_seconds` (now 1260 s) so a restart lets the current turn finish.
+
 ## 0.3.6
 
 - **Self-healing turns.** A turn that is interrupted (CLI timeout or error, mirror restart, Desktop window closing mid-turn, failed/ambiguous receipt) now resumes automatically in the same Bot Chat session, up to 2 times with backoff (20 s, 2 min). The resumed prompt tells the agent to check the conversation for what already happened and not repeat completed actions. The owner hears about it only if all attempts fail. A turn cancelled in Desktop is never resumed.
