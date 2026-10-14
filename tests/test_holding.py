@@ -56,17 +56,41 @@ def test_clean_cli_failure_does_not_block_next_turn(mirror):
     assert statuses(mirror)[2] == 'settled'
 
 
-def test_unknown_outcome_holds_until_unhold(mirror):
+def test_cli_timeout_fails_turn_and_does_not_block_next(mirror):
     mirror.handle_update(update(1, 'first'))
     mirror.handle_update(update(2, 'second'))
-    mirror.delivery.deliver.side_effect = DeliveryError('CLI timed out; outcome unknown, not automatically retried')
+    mirror.delivery.deliver.side_effect = [
+        DeliveryError('CLI timed out after 600s and was stopped; not automatically retried'),
+        {'status': 'settled', 'reply': 'ok', 'route': 'cli'}]
+    assert mirror.deliver_one() is True
+    assert statuses(mirror)[1] == 'failed'
+    assert 'could not run that turn' in outbox_text(mirror)
+    assert mirror.deliver_one() is True
+    assert statuses(mirror)[2] == 'settled'
+    assert mirror.delivery.deliver.call_count == 2  # timed-out turn never replayed
+
+
+def test_pre_submission_refusal_fails_turn_without_holding(mirror):
+    mirror.handle_update(update(1, 'first'))
+    mirror.handle_update(update(2, 'second'))
+    mirror.delivery.deliver.side_effect = [
+        DeliveryError('Bot Chat has an unsupported live owner; no turn submitted'),
+        {'status': 'settled', 'reply': 'ok', 'route': 'cli'}]
     mirror.deliver_one()
-    assert statuses(mirror)[1] == 'uncertain'
-    assert '/unhold' in outbox_text(mirror)
-    assert mirror.deliver_one() is False  # queue held
+    assert statuses(mirror)[1] == 'failed'
+    assert mirror.deliver_one() is True  # queue keeps moving, no /unhold needed
+    assert statuses(mirror)[2] == 'settled'
+    assert mirror.delivery.deliver.call_count == 2
+
+
+def test_unhold_still_releases_legacy_held_rows(mirror):
+    mirror.handle_update(update(1, 'first'))
+    mirror.handle_update(update(2, 'second'))
+    with mirror.store.tx() as db:
+        db.execute("UPDATE inbox SET status='uncertain' WHERE update_id=1")
+    assert mirror.deliver_one() is False  # legacy hold
     mirror.handle_update(update(3, '/unhold'))
     assert statuses(mirror)[1] == 'failed'
-    mirror.delivery.deliver.side_effect = None
     mirror.delivery.deliver.return_value = {'status': 'settled', 'reply': 'ok', 'route': 'cli'}
     assert mirror.deliver_one() is True
     assert statuses(mirror)[2] == 'settled'

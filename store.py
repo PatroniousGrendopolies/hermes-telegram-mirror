@@ -20,6 +20,14 @@ class Store:
         self.path = self.root / "mirror.sqlite3"
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         os.close(fd)
+        # WAL: readers (status checks, other hook processes, sqlite3 inspection) no longer block
+        # the poller's writes, which previously surfaced as "Polling failed" lock errors.
+        try:
+            conn = sqlite3.connect(self.path, timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.close()
+        except sqlite3.Error:
+            pass
         with self.tx() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -58,7 +66,7 @@ class Store:
 
     @contextmanager
     def tx(self):
-        db = sqlite3.connect(self.path, timeout=2)
+        db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         try:
             db.execute("BEGIN IMMEDIATE")
@@ -125,10 +133,21 @@ class Store:
         return identity
 
     def recover(self):
-        """Crash windows are unknown, never authorization for duplicate side effects."""
+        """Crash windows are unknown, never authorization for duplicate side effects.
+
+        A CLI turn that was mid-flight when the worker died was killed with it (launchd tears
+        down the job's process group), so it is not still running: fail it visibly, never
+        replay it, and do not hold every later message behind it. Mailbox turns stay in
+        'waiting' so their durable receipt (or owner loss) decides the outcome.
+        Returns the ids of interrupted CLI turns so the caller can tell the owner."""
         with self.tx() as db:
             db.execute("UPDATE outbox SET status='uncertain',error='sender interrupted; inspect before retry' WHERE status='sending'")
-            db.execute("UPDATE inbox SET status='uncertain',error='delivery interrupted; inspect before retry' WHERE status='delivering'")
+            db.execute("UPDATE inbox SET status='waiting' WHERE status='delivering' AND route='mailbox'")
+            ids = [r['id'] for r in db.execute(
+                "SELECT id FROM inbox WHERE status='delivering' AND COALESCE(route,'cli')='cli'")]
+            db.execute("UPDATE inbox SET status='failed',error='interrupted by mirror restart; not replayed' "
+                       "WHERE status='delivering' AND COALESCE(route,'cli')='cli'")
+        return ids
 
     def claim_input(self):
         with self.tx() as db:

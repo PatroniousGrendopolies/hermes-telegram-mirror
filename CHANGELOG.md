@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.5
+
+- Orphaned Desktop turns no longer freeze a bot. If the Desktop window that claimed a Telegram turn goes away without a receipt, after a 2 minute grace the turn fails visibly (never replayed) and the queue moves on; a ticket that was never claimed is re-queued. Previously the row sat in `waiting` forever (Corbys, 14 h).
+- No DeliveryError holds the queue any more (all are known outcomes); unexpected exceptions on the CLI route fail only that turn. `/unhold` stays for legacy held rows.
+- Restart recovery fails interrupted CLI turns (they died with the worker) instead of holding, and tells the owner.
+- Worker supervision: a dead poll/deliver/send thread (e.g. Telegram 401/409) stops the worker cleanly so launchd restarts it.
+- `fleet_health.py`: independent 60 s launchd watchdog across all mirrors (polling, heartbeat, held queues, delayed replies) with Mac notifications; reads SQLite metadata only, no credentials.
+
+- A CLI turn timeout now fails only that turn and notifies the owner, the same as a clean CLI failure. `subprocess.run` kills the CLI on timeout, so nothing is left running. Holding the queue here had silently wedged hermes-dev (since Oct 5), pme-grant (since Oct 1) and corbys (since Oct 6). The timed-out turn is still never replayed.
+- SQLite store switched to WAL with a 10s busy timeout (was 2s rollback journal), so readers no longer block the poller.
+- Poll failures now record the exception class (e.g. `UncertainSend` = network, `database locked`) instead of "details suppressed", and log a warning. Still no URLs or credentials.
+
 ## 0.3.4
 
 - A clean CLI failure (agent exited non-zero: bad model, quota, context) marks only that turn `failed`, notifies the owner on Telegram and lets the next turn through. Previously it was treated as an unknown outcome and held the queue indefinitely.

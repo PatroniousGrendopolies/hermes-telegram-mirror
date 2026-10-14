@@ -92,6 +92,11 @@ class Delivery:
         from tools.bot_live_delivery import read_delivery_result
         return read_delivery_result(self.home, identity)
 
+    def live_owner(self):
+        """Current advertised Bot Chat consumer, or None when no Desktop window owns it."""
+        from tools.bot_live_delivery import find_canonical_live_owner
+        return find_canonical_live_owner(self.home)
+
     def run_cli(self, session_id, text):
         """Public CLI; explicit profile, no shell, no approvals changed, no token in env."""
         query_dir = self.store.root / 'queries'
@@ -114,7 +119,8 @@ class Delivery:
                 raise DeliveryError(f'CLI exited {result.returncode}; inspect profile logs before resending')
             return {'status': 'settled', 'route': 'cli', 'reply': result.stdout.strip()}
         except subprocess.TimeoutExpired:
-            raise DeliveryError('CLI timed out; outcome unknown, not automatically retried') from None
+            raise DeliveryError(f"CLI timed out after {self.settings.get('turn_timeout_seconds', 600)}s "
+                                "and was stopped; not automatically retried") from None
         finally:
             # User requested no deletion: retain query in private macOS Trash, not plugin source.
             trash = Path.home() / '.Trash' / 'telegram-mirror-queries'

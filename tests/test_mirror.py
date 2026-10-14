@@ -131,7 +131,9 @@ def test_crash_windows_do_not_replay(mirror):
     mirror.store.claim_output()
     mirror.store.recover()
     assert not mirror.deliver_one() and not mirror.send_one()
-    assert rows(mirror, 'inbox')[0]['status'] == 'uncertain'
+    mirror.delivery.deliver.assert_not_called()  # never replayed
+    # Terminal, not held: an interrupted turn must not block every later message.
+    assert rows(mirror, 'inbox')[0]['status'] == 'failed'
     assert rows(mirror, 'outbox')[0]['status'] == 'uncertain'
 
 

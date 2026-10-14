@@ -191,39 +191,84 @@ class Mirror:
             if result['status'] == 'settled':
                 self.store.reply_once(row['id'], result.get('reply', ''), self.settings['bot_label'])
             elif result['status'] != 'waiting':
-                self.store.finish_input(row['id'], 'uncertain', error='Unexpected delivery result')
+                self._fail_turn(row['id'], 'the delivery layer returned an unexpected result')
         except DeliveryError as exc:
+            # Every DeliveryError is a KNOWN outcome: raised before anything was submitted (no
+            # Bot Chat, unsupported owner) or after the CLI process ended (clean failure,
+            # timeout kill). Nothing is still running: fail this turn visibly, never replay it,
+            # and keep the queue moving. Holding here is what silently wedged bots for hours.
             reason = str(exc)
-            if reason.startswith('CLI exited'):
-                # The agent ran and failed cleanly (bad model, quota, context): nothing reached the
-                # Bot Chat, so this turn is simply failed and must not block the ones behind it.
-                self.store.finish_input(row['id'], 'failed', error=reason)
-                self.store.enqueue_text(f"inbound:{row['id']}:fail",
-                                        f"😢 {self.settings['bot_label']} could not run that turn ({reason}). "
-                                        "Check the profile's model/provider and resend.")
-                log.warning('telegram-mirror turn failed: %s', reason)
-            else:
-                self.store.finish_input(row['id'], 'uncertain', error=reason)
-                self.store.enqueue_text(f"inbound:{row['id']}:held",
-                                        f"😢 {self.settings['bot_label']}: {reason}. The queue is held until you send /unhold.")
-                log.warning('telegram-mirror delivery needs inspection (no automatic retry)')
+            self.store.finish_input(row['id'], 'failed', error=reason)
+            self.store.enqueue_text(f"inbound:{row['id']}:fail",
+                                    f"😢 {self.settings['bot_label']} could not run that turn ({reason}). "
+                                    "Later messages continue; resend it if it still matters.")
+            log.warning('telegram-mirror turn failed: %s', reason)
         except Exception:
             with self.store.tx() as db:
-                db.execute("UPDATE inbox SET status='uncertain',error='Delivery outcome unknown; inspect before resending' WHERE id=? AND status!='settled'", (row['id'],))
-            self.store.enqueue_text(f"inbound:{row['id']}:held",
-                                    f"😢 {self.settings['bot_label']}: delivery outcome unknown. The queue is held until you send /unhold.")
-            log.warning('telegram-mirror delivery needs inspection (no automatic retry)')
+                cur = db.execute("SELECT route,status FROM inbox WHERE id=?", (row['id'],)).fetchone()
+            if cur and cur['status'] in ('settled', 'failed'):
+                pass
+            elif cur and cur['route'] == 'mailbox':
+                # A ticket may exist: the durable receipt / owner check decides, never a guess.
+                self.store.finish_input(row['id'], 'waiting', error='Delivery raised; awaiting receipt')
+            else:
+                # CLI route: subprocess.run has returned or raised, so the turn is not running.
+                self._fail_turn(row['id'], 'the mirror hit an internal error while running it')
         return True
 
+    OWNER_GRACE_SECONDS = 120
+
     def check_receipts(self):
+        """Resolve mailbox turns from their durable receipt, or from proof the owner is gone.
+
+        A Desktop window that claimed a turn and then closed/crashed never writes a receipt;
+        before this, that row sat in 'waiting' forever and silently blocked the bot."""
         with self.store.tx() as db:
             rows = db.execute("SELECT id FROM inbox WHERE route='mailbox' AND status IN ('waiting','uncertain','delivering')").fetchall()
+        lost = getattr(self, '_owner_lost_since', None)
+        if lost is None:
+            lost = self._owner_lost_since = {}
         for row in rows:
-            receipt = self.delivery.receipt(row['id'])
+            ident = row['id']
+            receipt = self.delivery.receipt(ident)
             if receipt and receipt['status'] == 'settled':
-                self.store.reply_once(row['id'], receipt.get('reply', ''), self.settings['bot_label'])
-            elif receipt and receipt['status'] in {'failed', 'cancelled', 'ambiguous'}:
-                self.store.finish_input(row['id'], 'uncertain', error=f"Mailbox {receipt['status']}; no automatic retry")
+                self.store.reply_once(ident, receipt.get('reply', ''), self.settings['bot_label'])
+                lost.pop(ident, None)
+                continue
+            if receipt and receipt['status'] in {'failed', 'cancelled', 'ambiguous'}:
+                self._fail_turn(ident, f"the Desktop chat reported {receipt['status']}")
+                lost.pop(ident, None)
+                continue
+            if receipt is None:
+                # No ticket was ever written: the turn provably never started. Safe to re-queue.
+                self.store.finish_input(ident, 'pending', error=None)
+                lost.pop(ident, None)
+                continue
+            live = self.delivery.live_owner()
+            owned = bool(live) and live.get('lease_id') == receipt.get('lease_id') \
+                and live.get('live_session_id') == receipt.get('live_session_id')
+            if owned:
+                lost.pop(ident, None)
+                continue
+            since = lost.setdefault(ident, time.time())
+            if time.time() - since < self.OWNER_GRACE_SECONDS:
+                continue
+            lost.pop(ident, None)
+            if receipt['status'] == 'queued':
+                # Never claimed, and its owner is gone (a new lease can never claim it): re-run it.
+                log.warning('telegram-mirror re-queued an unclaimed turn whose Desktop owner left')
+                self.store.finish_input(ident, 'pending', error='Desktop owner left before starting; re-queued')
+            else:
+                self._fail_turn(ident, 'the Desktop chat that was running it closed before finishing')
+
+    def _fail_turn(self, ident, why):
+        """Started-but-unfinished: never replay (side effects may have happened), never block."""
+        self.store.finish_input(ident, 'failed', error=why)
+        self.store.enqueue_text(f"inbound:{ident}:interrupted",
+                                f"😢 {self.settings['bot_label']}: one earlier request was interrupted ({why}). "
+                                "It may have partly run, so it was not repeated. Later messages continue; "
+                                "resend it if it still matters.")
+        log.warning('telegram-mirror turn interrupted; failed without replay')
 
     def start(self):
         if self.settings.get('host', 'gateway') != 'gateway':
@@ -265,7 +310,10 @@ class Mirror:
             return
         self._lock = lock
         try:
-            self.store.recover()
+            for ident in self.store.recover() or []:
+                self.store.enqueue_text(f"inbound:{ident}:restart",
+                                        f"😢 {self.settings['bot_label']}: one request was interrupted by a mirror "
+                                        "restart. It was not repeated; resend it if it still matters.")
             self.api = self.api or Telegram(self.settings['keychain_service'],
                                            self.settings['keychain_account'], self.settings['chat_id'])
             me = self.api.call('getMe')
@@ -276,12 +324,40 @@ class Mirror:
                 raise RuntimeError('An existing webhook conflicts with long polling')
             self.store.set('bot', {'id': me['id'], 'username': me['username']})
             self.store.set('startup_error', None)
+            self.store.set('worker_error', None)  # Clear stale error on healthy startup
             self._thread(self._poll, 'telegram-mirror-poll')
             self._thread(self._deliver_loop, 'telegram-mirror-deliver')
             self._thread(self._send_loop, 'telegram-mirror-send')
             log.info('telegram-mirror worker leader pid=%s', os.getpid())
+            
+            # Supervise critical threads: poll, deliver, send
+            poll_thread = next((t for t in self._threads if 'poll' in t.name), None)
+            deliver_thread = next((t for t in self._threads if 'deliver' in t.name), None)
+            send_thread = next((t for t in self._threads if 'send' in t.name), None)
+            
             while not self.stop.is_set():
                 self.store.set('heartbeat', {'pid': os.getpid(), 'time': time.time()})
+                
+                # Check critical worker liveness
+                if poll_thread and not poll_thread.is_alive():
+                    log.error('telegram-mirror poll thread died, initiating controlled shutdown')
+                    if not self.store.get('worker_error'):
+                        self.store.set('worker_error', 'Poll thread exited unexpectedly')
+                    self.stop.set()
+                    break
+                if deliver_thread and not deliver_thread.is_alive():
+                    log.error('telegram-mirror deliver thread died, initiating controlled shutdown')
+                    if not self.store.get('worker_error'):
+                        self.store.set('worker_error', 'Deliver thread exited unexpectedly')
+                    self.stop.set()
+                    break
+                if send_thread and not send_thread.is_alive():
+                    log.error('telegram-mirror send thread died, initiating controlled shutdown')
+                    if not self.store.get('worker_error'):
+                        self.store.set('worker_error', 'Send thread exited unexpectedly')
+                    self.stop.set()
+                    break
+                
                 self.stop.wait(5)
         except Exception:
             log.error('telegram-mirror worker startup failed; check Keychain, bot identity and webhook configuration')
@@ -313,10 +389,20 @@ class Mirror:
                 self.store.set('poll_error', f'Telegram API {exc.code}')
                 if exc.code in {401, 409}:
                     log.error('telegram-mirror polling stopped: credential or competing consumer error')
+                    self.store.set('worker_error', f'Poll thread exited on API {exc.code}')
+                    self.stop.set()
                     return
                 self.stop.wait(max(5, exc.retry_after))
-            except Exception:
-                self.store.set('poll_error', 'Polling failed (details suppressed)')
+            except Exception as exc:
+                # Exception class names carry no credentials (transport strips URLs), and they
+                # separate network trouble (UncertainSend) from local SQLite lock contention.
+                kind = type(exc).__name__
+                detail = 'database locked' if 'locked' in str(exc).lower() and 'sqlite' in type(exc).__module__ else kind
+                log.warning('telegram-mirror poll failed: %s', detail)
+                try:
+                    self.store.set('poll_error', f'Polling failed ({detail})')
+                except Exception:
+                    pass
                 self.stop.wait(5)
 
     def _deliver_loop(self):
