@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .compat import Delivery, DeliveryError, gateway_host
 from . import media
-from .store import Store, marker
+from .store import Store, delivery_key, marker
 from .transport import APIError, Telegram
 from .progress import Progress
 
@@ -191,18 +191,13 @@ class Mirror:
             if result['status'] == 'settled':
                 self.store.reply_once(row['id'], result.get('reply', ''), self.settings['bot_label'])
             elif result['status'] != 'waiting':
-                self._fail_turn(row['id'], 'the delivery layer returned an unexpected result')
+                self._heal_turn(row['id'], 'the delivery layer returned an unexpected result')
         except DeliveryError as exc:
             # Every DeliveryError is a KNOWN outcome: raised before anything was submitted (no
             # Bot Chat, unsupported owner) or after the CLI process ended (clean failure,
             # timeout kill). Nothing is still running: fail this turn visibly, never replay it,
             # and keep the queue moving. Holding here is what silently wedged bots for hours.
-            reason = str(exc)
-            self.store.finish_input(row['id'], 'failed', error=reason)
-            self.store.enqueue_text(f"inbound:{row['id']}:fail",
-                                    f"😢 {self.settings['bot_label']} could not run that turn ({reason}). "
-                                    "Later messages continue; resend it if it still matters.")
-            log.warning('telegram-mirror turn failed: %s', reason)
+            self._heal_turn(row['id'], str(exc))
         except Exception:
             with self.store.tx() as db:
                 cur = db.execute("SELECT route,status FROM inbox WHERE id=?", (row['id'],)).fetchone()
@@ -213,7 +208,7 @@ class Mirror:
                 self.store.finish_input(row['id'], 'waiting', error='Delivery raised; awaiting receipt')
             else:
                 # CLI route: subprocess.run has returned or raised, so the turn is not running.
-                self._fail_turn(row['id'], 'the mirror hit an internal error while running it')
+                self._heal_turn(row['id'], 'the mirror hit an internal error while running it')
         return True
 
     OWNER_GRACE_SECONDS = 120
@@ -224,19 +219,24 @@ class Mirror:
         A Desktop window that claimed a turn and then closed/crashed never writes a receipt;
         before this, that row sat in 'waiting' forever and silently blocked the bot."""
         with self.store.tx() as db:
-            rows = db.execute("SELECT id FROM inbox WHERE route='mailbox' AND status IN ('waiting','uncertain','delivering')").fetchall()
+            rows = db.execute("SELECT id,attempt FROM inbox WHERE route='mailbox' AND status IN ('waiting','uncertain','delivering')").fetchall()
         lost = getattr(self, '_owner_lost_since', None)
         if lost is None:
             lost = self._owner_lost_since = {}
         for row in rows:
             ident = row['id']
-            receipt = self.delivery.receipt(ident)
+            receipt = self.delivery.receipt(delivery_key(ident, row['attempt'] or 0))
             if receipt and receipt['status'] == 'settled':
                 self.store.reply_once(ident, receipt.get('reply', ''), self.settings['bot_label'])
                 lost.pop(ident, None)
                 continue
-            if receipt and receipt['status'] in {'failed', 'cancelled', 'ambiguous'}:
-                self._fail_turn(ident, f"the Desktop chat reported {receipt['status']}")
+            if receipt and receipt['status'] == 'cancelled':
+                # The owner stopped it on purpose in Desktop: respect that, never resume.
+                self._fail_turn(ident, 'it was cancelled in the Desktop chat', resumable=False)
+                lost.pop(ident, None)
+                continue
+            if receipt and receipt['status'] in {'failed', 'ambiguous'}:
+                self._heal_turn(ident, f"the Desktop chat reported {receipt['status']}")
                 lost.pop(ident, None)
                 continue
             if receipt is None:
@@ -259,16 +259,33 @@ class Mirror:
                 log.warning('telegram-mirror re-queued an unclaimed turn whose Desktop owner left')
                 self.store.finish_input(ident, 'pending', error='Desktop owner left before starting; re-queued')
             else:
-                self._fail_turn(ident, 'the Desktop chat that was running it closed before finishing')
+                self._heal_turn(ident, 'the Desktop chat that was running it closed before finishing')
 
-    def _fail_turn(self, ident, why):
-        """Started-but-unfinished: never replay (side effects may have happened), never block."""
+    MAX_RESUMES = 2
+    RESUME_DELAYS = (20, 120)
+
+    def _heal_turn(self, ident, why):
+        """Self-healing: an interrupted or failed turn resumes on its own, in the same Bot Chat
+        session, with a note telling the agent to check what already happened and not redo it.
+        Only after MAX_RESUMES does the owner hear about it, and later messages never wait on it."""
+        attempt = self.store.attempt_of(ident)
+        if attempt < self.MAX_RESUMES:
+            delay = self.RESUME_DELAYS[min(attempt, len(self.RESUME_DELAYS) - 1)]
+            self.store.schedule_resume(ident, why, delay)
+            log.warning('telegram-mirror turn interrupted (%s); auto-resume %d/%d in %ds',
+                        why, attempt + 1, self.MAX_RESUMES, delay)
+            return
+        self._fail_turn(ident, why)
+
+    def _fail_turn(self, ident, why, resumable=True):
+        """Give up visibly. Never blocks later messages."""
         self.store.finish_input(ident, 'failed', error=why)
+        tried = (f" I retried it {self.MAX_RESUMES} times on my own and it still didn't finish."
+                 if resumable and self.MAX_RESUMES else '')
         self.store.enqueue_text(f"inbound:{ident}:interrupted",
-                                f"😢 {self.settings['bot_label']}: one earlier request was interrupted ({why}). "
-                                "It may have partly run, so it was not repeated. Later messages continue; "
-                                "resend it if it still matters.")
-        log.warning('telegram-mirror turn interrupted; failed without replay')
+                                f"😢 {self.settings['bot_label']}: one earlier request didn't finish ({why}).{tried} "
+                                "Later messages continue; resend it if it still matters.")
+        log.warning('telegram-mirror turn gave up: %s', why)
 
     def start(self):
         if self.settings.get('host', 'gateway') != 'gateway':
@@ -311,9 +328,7 @@ class Mirror:
         self._lock = lock
         try:
             for ident in self.store.recover() or []:
-                self.store.enqueue_text(f"inbound:{ident}:restart",
-                                        f"😢 {self.settings['bot_label']}: one request was interrupted by a mirror "
-                                        "restart. It was not repeated; resend it if it still matters.")
+                self._heal_turn(ident, 'interrupted by a mirror restart')
             self.api = self.api or Telegram(self.settings['keychain_service'],
                                            self.settings['keychain_account'], self.settings['chat_id'])
             me = self.api.call('getMe')
@@ -368,7 +383,7 @@ class Mirror:
             self.stop.set()
             for thread in self._threads:
                 if thread is not threading.current_thread():
-                    thread.join(timeout=self.settings.get('turn_timeout_seconds', 600) + 40)
+                    thread.join(timeout=self.settings.get('turn_timeout_seconds', 1200) + 40)
             lock.close()
             self._lock = None
 

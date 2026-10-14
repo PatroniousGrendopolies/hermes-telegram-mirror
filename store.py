@@ -49,7 +49,9 @@ class Store:
                 if name not in columns:
                     db.execute(f'ALTER TABLE outbox ADD COLUMN {name} {declaration}')
             inbox_columns = {r[1] for r in db.execute('PRAGMA table_info(inbox)')}
-            for name, declaration in {'tg_message_id': 'INTEGER', 'reaction_sent': 'TEXT'}.items():
+            for name, declaration in {'tg_message_id': 'INTEGER', 'reaction_sent': 'TEXT',
+                                      'attempt': 'INTEGER NOT NULL DEFAULT 0',
+                                      'retry_at': 'REAL NOT NULL DEFAULT 0'}.items():
                 if name not in inbox_columns:
                     db.execute(f'ALTER TABLE inbox ADD COLUMN {name} {declaration}')
             db.executescript("""
@@ -155,10 +157,29 @@ class Store:
             if db.execute("SELECT 1 FROM inbox WHERE status IN ('delivering','uncertain','waiting') LIMIT 1").fetchone():
                 return None
             row = db.execute("SELECT * FROM inbox WHERE status='pending' ORDER BY created,update_id LIMIT 1").fetchone()
-            if row:
+            # A resuming turn keeps its place in line: later messages may depend on it.
+            if row and row['retry_at'] <= time.time():
                 db.execute("UPDATE inbox SET status='delivering' WHERE id=?", (row['id'],))
                 return dict(row)
         return None
+
+    RESUME_NOTE = ("\n\n[Telegram mirror: an earlier attempt at this request was interrupted before it "
+                   "finished. Check this conversation for what was already done (emails, messages, "
+                   "files) and continue from there. Do not repeat actions that already completed.]")
+
+    def schedule_resume(self, identity, why, delay):
+        """Put an interrupted turn back in line with a resume note. Same session, so the agent
+        sees its own earlier tool calls and can skip side effects that already happened."""
+        with self.tx() as db:
+            db.execute("UPDATE inbox SET status='pending',attempt=attempt+1,retry_at=?,error=?,"
+                       "text=CASE WHEN instr(text,?)>0 THEN text ELSE text||? END WHERE id=?",
+                       (time.time() + delay, f'resuming: {why}', self.RESUME_NOTE, self.RESUME_NOTE,
+                        identity))
+
+    def attempt_of(self, identity):
+        with self.tx() as db:
+            row = db.execute("SELECT attempt FROM inbox WHERE id=?", (identity,)).fetchone()
+        return row['attempt'] if row else 0
 
     # Receipt reactions on the user's own Telegram message, derived from inbox status so every
     # status transition (including crash recovery) is reflected without per-path bookkeeping.
@@ -254,3 +275,10 @@ class Store:
 
 def marker(row: dict) -> str:
     return f"📱 [{row['id'][:6]}] {row['text']}"
+
+
+def delivery_key(identity: str, attempt: int = 0) -> str:
+    """Mailbox tickets are immutable per id, so each resume attempt needs its own key."""
+    if not attempt:
+        return identity
+    return hashlib.sha256(f'{identity}:resume:{attempt}'.encode()).hexdigest()

@@ -26,7 +26,9 @@ def mirror(tmp_path):
     delivery.session.return_value = 'canonical'
     api = Mock()
     api.send.return_value = {'message_id': 12}
-    return Mirror(tmp_path, settings, api=api, delivery=delivery)
+    m = Mirror(tmp_path, settings, api=api, delivery=delivery)
+    m.MAX_RESUMES = 0  # these tests pin the give-up path; self-healing is in test_self_healing.py
+    return m
 
 
 def update(uid, text):
@@ -51,7 +53,7 @@ def test_clean_cli_failure_does_not_block_next_turn(mirror):
                                            {'status': 'settled', 'reply': 'ok', 'route': 'cli'}]
     assert mirror.deliver_one() is True
     assert statuses(mirror)[1] == 'failed'
-    assert 'could not run that turn' in outbox_text(mirror)
+    assert "didn't finish" in outbox_text(mirror)
     assert mirror.deliver_one() is True
     assert statuses(mirror)[2] == 'settled'
 
@@ -64,7 +66,7 @@ def test_cli_timeout_fails_turn_and_does_not_block_next(mirror):
         {'status': 'settled', 'reply': 'ok', 'route': 'cli'}]
     assert mirror.deliver_one() is True
     assert statuses(mirror)[1] == 'failed'
-    assert 'could not run that turn' in outbox_text(mirror)
+    assert "didn't finish" in outbox_text(mirror)
     assert mirror.deliver_one() is True
     assert statuses(mirror)[2] == 'settled'
     assert mirror.delivery.deliver.call_count == 2  # timed-out turn never replayed

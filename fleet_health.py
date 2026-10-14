@@ -38,6 +38,32 @@ def inspect(db_path, now):
     return {'issues': issues, 'pid': hb.get('pid'), 'idle': not (busy or pending_send)}
 
 
+DEAD = ('worker heartbeat stale', 'Telegram polling stale', 'worker error', 'startup error')
+MAX_HEALS_PER_HOUR = 3
+
+
+def heal(label, profile, health, heals, now, kick=None):
+    """Self-healing: restart a dead/stalled worker ourselves instead of only alerting.
+
+    Restart is safe: interrupted turns are resumed by the mirror (same session, told not to
+    redo finished actions). Rate-limited so a persistent fault (revoked token, no network)
+    escalates to a notification instead of a restart loop. Returns True if it restarted."""
+    if not any(i in health['issues'] for i in DEAD):
+        return False
+    recent = [t for t in heals.get(profile, []) if now - t < 3600]
+    heals[profile] = recent
+    if len(recent) >= MAX_HEALS_PER_HOUR:
+        health['issues'].append('auto-restart limit reached; needs a human')
+        return False
+    kick = kick or (lambda l: subprocess.run(['launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{l}'],
+                                              capture_output=True, timeout=30).returncode)
+    if kick(label) == 0:
+        recent.append(now)
+        health['healed'] = True
+        return True
+    return False
+
+
 def save(path, data):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_suffix('.tmp')
@@ -57,7 +83,8 @@ def main():
     old = json.loads(state_path.read_text()) if state_path.exists() else {}
     rollout_path = args.state_dir / 'rollout.json'
     rollout = json.loads(rollout_path.read_text()) if rollout_path.exists() else {}
-    report = {'checked_at': now, 'profiles': {}, 'last_alert': old.get('last_alert', 0)}
+    report = {'checked_at': now, 'profiles': {}, 'last_alert': old.get('last_alert', 0),
+              'heals': old.get('heals', {})}
     for path in sorted((Path.home()/'Library/LaunchAgents').glob('ai.hermes.telegram-mirror.*.plist')):
         label = path.stem
         profile = label.removeprefix('ai.hermes.telegram-mirror.')
@@ -74,6 +101,9 @@ def main():
                 result = subprocess.run(['launchctl','kill','SIGTERM',f'gui/{os.getuid()}/{label}'],capture_output=True,timeout=10)
                 if result.returncode == 0:
                     request['signalled_at'] = now
+            if heal(label, profile, health, report['heals'], now):
+                # Healed silently; only alert if the restart itself does not take.
+                health['issues'] = []
             report['profiles'][profile] = health
         except Exception as exc:
             report['profiles'][profile] = {'issues': [f'health check failed ({type(exc).__name__})']}

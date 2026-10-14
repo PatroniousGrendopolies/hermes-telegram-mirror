@@ -26,7 +26,7 @@ class Progress:
                 origin = self.store.inbound_for_text(db, user)
                 origin_key = f"inbound:{origin['id']}" if origin else f'turn:{key}'
                 db.execute('INSERT OR IGNORE INTO live_turns VALUES (?,?,?,?,?,?,?,?)',
-                           (key, sid, origin_key, 1, event['at'] + self.settings.get('turn_timeout_seconds', 600), 0, '', ''))
+                           (key, sid, origin_key, 1, event['at'] + self.settings.get('turn_timeout_seconds', 1200), 0, '', ''))
                 if kind == 'start' and user and not origin:
                     self.store.enqueue(db, f'{origin_key}:user', f"👤 {self.settings['user_label']} (Desktop): {user}", kind='user')
             return

@@ -81,7 +81,9 @@ class Delivery:
             if not live or live['session_id'] != session_id:
                 raise DeliveryError('Bot Chat has an unsupported live owner; no turn submitted')
             self.store.finish_input(row['id'], 'delivering', 'mailbox')
-            deliver_to_live_owner(self.home, live, text, delivery_id=row['id'])
+            from .store import delivery_key
+            deliver_to_live_owner(self.home, live, text,
+                                  delivery_id=delivery_key(row['id'], row.get('attempt') or 0))
             # Persist acceptance and let the serial worker await the durable receipt.
             self.store.finish_input(row['id'], 'waiting', 'mailbox')
             return {'status': 'waiting', 'route': 'mailbox'}
@@ -113,14 +115,14 @@ class Delivery:
         try:
             result = subprocess.run(command, cwd=str(self.home), env=env,
                                     capture_output=True, text=True,
-                                    timeout=self.settings.get('turn_timeout_seconds', 600))
+                                    timeout=self.settings.get('turn_timeout_seconds', 1200))
             if result.returncode:
                 # Never forward raw stderr/stdout: they may contain private context/credentials.
                 raise DeliveryError(f'CLI exited {result.returncode}; inspect profile logs before resending')
             return {'status': 'settled', 'route': 'cli', 'reply': result.stdout.strip()}
         except subprocess.TimeoutExpired:
-            raise DeliveryError(f"CLI timed out after {self.settings.get('turn_timeout_seconds', 600)}s "
-                                "and was stopped; not automatically retried") from None
+            raise DeliveryError(f"CLI timed out after {self.settings.get('turn_timeout_seconds', 1200)}s "
+                                "and was stopped") from None
         finally:
             # User requested no deletion: retain query in private macOS Trash, not plugin source.
             trash = Path.home() / '.Trash' / 'telegram-mirror-queries'

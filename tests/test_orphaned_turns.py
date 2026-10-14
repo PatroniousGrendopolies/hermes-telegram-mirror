@@ -34,6 +34,7 @@ def mirror(tmp_path):
     api.send.return_value = {'message_id': 12}
     m = Mirror(tmp_path, settings, api=api, delivery=delivery)
     m.OWNER_GRACE_SECONDS = 0
+    m.MAX_RESUMES = 0  # give-up path; self-healing is in test_self_healing.py
     return m
 
 
@@ -66,7 +67,7 @@ def test_claimed_turn_whose_owner_left_fails_and_unblocks_queue(mirror):
     assert mirror.deliver_one() is False  # still blocked before the check runs
     mirror.check_receipts()
     assert statuses(mirror)[1] == 'failed'
-    assert 'not repeated' in outbox_text(mirror)
+    assert "didn't finish" in outbox_text(mirror)
     mirror.delivery.deliver.return_value = {'status': 'settled', 'reply': 'ok', 'route': 'cli'}
     assert mirror.deliver_one() is True
     assert statuses(mirror)[2] == 'settled'

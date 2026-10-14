@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.6
+
+- **Self-healing turns.** A turn that is interrupted (CLI timeout or error, mirror restart, Desktop window closing mid-turn, failed/ambiguous receipt) now resumes automatically in the same Bot Chat session, up to 2 times with backoff (20 s, 2 min). The resumed prompt tells the agent to check the conversation for what already happened and not repeat completed actions. The owner hears about it only if all attempts fail. A turn cancelled in Desktop is never resumed.
+- A resuming turn keeps its place in line, so later messages that depend on it never jump ahead.
+- Each resume gets its own mailbox ticket id (tickets are immutable per id); receipts are read under the current attempt's key.
+- **Self-healing workers.** `fleet_health.py` now restarts a worker whose heartbeat or polling is stale, or that recorded a worker/startup error, instead of only alerting. Capped at 3 restarts per hour per bot; past that it escalates to a Mac notification.
+- Default `turn_timeout_seconds` raised 600 → 1200: real multi-tool turns (reports, emails) were being killed at 10 min.
+
 ## 0.3.5
 
 - Orphaned Desktop turns no longer freeze a bot. If the Desktop window that claimed a Telegram turn goes away without a receipt, after a 2 minute grace the turn fails visibly (never replayed) and the queue moves on; a ticket that was never claimed is re-queued. Previously the row sat in `waiting` forever (Corbys, 14 h).

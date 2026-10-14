@@ -54,3 +54,34 @@ def test_report_permissions(tmp_path):
     health.save(path, {'ok':True})
     assert path.stat().st_mode & 0o777 == 0o600
     assert json.loads(path.read_text()) == {'ok':True}
+
+
+def test_dead_worker_is_restarted_not_just_reported():
+    import fleet_health as fh
+    kicked = []
+    health = {'issues': ['worker heartbeat stale']}
+    assert fh.heal('lbl', 'corbys', health, {}, 1000.0, kick=lambda l: kicked.append(l) or 0)
+    assert kicked == ['lbl'] and health['healed']
+
+
+def test_healthy_worker_is_never_restarted():
+    import fleet_health as fh
+    kicked = []
+    assert not fh.heal('lbl', 'p', {'issues': ['outbound pending over five minutes']}, {}, 0.0,
+                       kick=lambda l: kicked.append(l) or 0)
+    assert kicked == []
+
+
+def test_restart_loop_is_capped_and_escalates():
+    import fleet_health as fh
+    heals = {'p': [900.0, 950.0, 990.0]}
+    health = {'issues': ['Telegram polling stale']}
+    assert not fh.heal('lbl', 'p', health, heals, 1000.0, kick=lambda l: 0)
+    assert 'auto-restart limit reached; needs a human' in health['issues']
+
+
+def test_old_restarts_age_out_of_the_cap():
+    import fleet_health as fh
+    heals = {'p': [0.0, 1.0, 2.0]}
+    assert fh.heal('lbl', 'p', {'issues': ['worker error']}, heals, 10000.0, kick=lambda l: 0)
+    assert heals['p'] == [10000.0]
